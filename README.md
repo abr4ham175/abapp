@@ -1,4 +1,4 @@
-# Sistema de Ventas y Control de Almacén
+# Sistema de Ventas y Control de Almacén.
 
 Sistema web (Next.js + Supabase) con dos módulos interconectados:
 
