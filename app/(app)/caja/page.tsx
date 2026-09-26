@@ -26,10 +26,17 @@ export default function CajaPage() {
     e.preventDefault();
     setError(null);
     setResult(null);
+
+    const raw = search.trim();
+    // Si el usuario escribe solo números (ej. "123"), se completa al formato
+    // real del pedido (ej. "PED-000123"). Si escribe el código completo,
+    // se usa tal cual.
+    const orderNumber = /^\d+$/.test(raw) ? `PED-${raw.padStart(6, "0")}` : raw.toUpperCase();
+
     const { data } = await supabase
       .from("sales_orders")
       .select("id, order_number, total, status, customers(full_name, doc_type, doc_number)")
-      .eq("order_number", search.trim())
+      .eq("order_number", orderNumber)
       .maybeSingle();
 
     if (!data) {
@@ -76,7 +83,7 @@ export default function CajaPage() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Número de pedido (ej. PED-000123)"
+          placeholder="Número de pedido (ej. 123 o PED-000123)"
           className="flex-1 border rounded-lg px-3 py-2"
         />
         <button className="bg-brand text-white rounded-lg px-4">Buscar</button>
