@@ -20,6 +20,7 @@ export default function NuevoPedidoPage() {
   const [showScanner, setShowScanner] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedOrder, setSavedOrder] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   function addProduct(product: ProductResult) {
     setLines((prev) => {
@@ -54,78 +55,94 @@ export default function NuevoPedidoPage() {
   async function handleSave() {
     if (lines.length === 0) return;
     setSaving(true);
+    setError(null);
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) throw new Error("Tu sesión expiró. Vuelve a iniciar sesión.");
 
-    // 1. Resolver/crear cliente por número de documento
-    let customerId: string;
-    const existingCustomer = await supabase
-      .from("customers")
-      .select("id")
-      .eq("doc_number", docNumber)
-      .maybeSingle();
-
-    if (existingCustomer.data) {
-      customerId = existingCustomer.data.id;
-    } else {
-      const created = await supabase
+      // 1. Resolver/crear cliente por número de documento
+      let customerId: string;
+      const existingCustomer = await supabase
         .from("customers")
-        .insert({ doc_type: docType, doc_number: docNumber, full_name: customerName })
         .select("id")
+        .eq("doc_number", docNumber)
+        .maybeSingle();
+
+      if (existingCustomer.data) {
+        customerId = existingCustomer.data.id;
+      } else {
+        const created = await supabase
+          .from("customers")
+          .insert({ doc_type: docType, doc_number: docNumber, full_name: customerName })
+          .select("id")
+          .single();
+        if (created.error) throw new Error("No se pudo registrar el cliente: " + created.error.message);
+        customerId = created.data.id;
+      }
+
+      // 2. Obtener el perfil (ubicación/tienda del vendedor)
+      const profile = await supabase.from("profiles").select("location_id, full_name").eq("id", user.id).single();
+      if (profile.error) throw new Error("No se pudo leer tu perfil: " + profile.error.message);
+      if (!profile.data.location_id) {
+        throw new Error(
+          "Tu usuario no tiene una tienda/ubicación asignada. Pide a un administrador que te la asigne en Administración → Usuarios y roles."
+        );
+      }
+
+      // 3. Crear el pedido
+      const order = await supabase
+        .from("sales_orders")
+        .insert({
+          location_id: profile.data.location_id,
+          seller_id: user.id,
+          customer_id: customerId,
+        })
+        .select("id, order_number")
         .single();
-      customerId = created.data!.id;
+      if (order.error) throw new Error("No se pudo crear el pedido: " + order.error.message);
+
+      // 4. Crear los items
+      const items = await supabase.from("sales_order_items").insert(
+        lines.map((l) => ({
+          order_id: order.data.id,
+          product_id: l.product.id,
+          quantity: l.quantity,
+          unit_price: l.product.sale_price,
+          subtotal: l.quantity * l.product.sale_price,
+        }))
+      );
+      if (items.error) throw new Error("El pedido se creó pero no se pudieron guardar los productos: " + items.error.message);
+
+      // 5. Generar e imprimir el ticket 80mm
+      const doc = generateTicket80mm({
+        orderNumber: order.data.order_number,
+        customerName,
+        customerDoc: `${docType} ${docNumber}`,
+        sellerName: profile.data.full_name ?? "",
+        items: lines.map((l) => ({
+          description: l.product.description,
+          quantity: l.quantity,
+          unit_price: l.product.sale_price,
+          subtotal: l.quantity * l.product.sale_price,
+        })),
+        total,
+      });
+      doc.autoPrint?.();
+      doc.output("dataurlnewwindow");
+
+      setSavedOrder(order.data.order_number);
+      setLines([]);
+      setDocType("SIN_DOC");
+      setDocNumber("00000000");
+      setCustomerName("Cliente Varios");
+    } catch (err: any) {
+      setError(err.message ?? "Ocurrió un error inesperado al guardar el pedido.");
+    } finally {
+      setSaving(false);
     }
-
-    // 2. Obtener el perfil (ubicación/tienda del vendedor)
-    const profile = await supabase.from("profiles").select("location_id, full_name").eq("id", user!.id).single();
-
-    // 3. Crear el pedido
-    const order = await supabase
-      .from("sales_orders")
-      .insert({
-        location_id: profile.data!.location_id,
-        seller_id: user!.id,
-        customer_id: customerId,
-      })
-      .select("id, order_number")
-      .single();
-
-    // 4. Crear los items
-    await supabase.from("sales_order_items").insert(
-      lines.map((l) => ({
-        order_id: order.data!.id,
-        product_id: l.product.id,
-        quantity: l.quantity,
-        unit_price: l.product.sale_price,
-        subtotal: l.quantity * l.product.sale_price,
-      }))
-    );
-
-    // 5. Generar e imprimir el ticket 80mm
-    const doc = generateTicket80mm({
-      orderNumber: order.data!.order_number,
-      customerName,
-      customerDoc: `${docType} ${docNumber}`,
-      sellerName: profile.data?.full_name ?? "",
-      items: lines.map((l) => ({
-        description: l.product.description,
-        quantity: l.quantity,
-        unit_price: l.product.sale_price,
-        subtotal: l.quantity * l.product.sale_price,
-      })),
-      total,
-    });
-    doc.autoPrint?.();
-    doc.output("dataurlnewwindow");
-
-    setSavedOrder(order.data!.order_number);
-    setLines([]);
-    setDocType("SIN_DOC");
-    setDocNumber("00000000");
-    setCustomerName("Cliente Varios");
-    setSaving(false);
   }
 
   return (
@@ -136,6 +153,10 @@ export default function NuevoPedidoPage() {
         <div className="bg-green-50 text-green-700 border border-green-200 rounded-lg px-4 py-2 text-sm">
           Pedido {savedOrder} guardado. Se abrió el ticket en una nueva pestaña para imprimir.
         </div>
+      )}
+
+      {error && (
+        <div className="bg-red-50 text-red-700 border border-red-200 rounded-lg px-4 py-2 text-sm">{error}</div>
       )}
 
       <div className="bg-white border rounded-xl p-4">
